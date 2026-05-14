@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 SUPPORTED_EXTENSIONS=(
   mp3 m4a flac wav aac ogg
@@ -25,12 +24,6 @@ OPTIONS:
   -n    Dry run mode
   -v    Verbose output
   -h    Show help
-
-EXAMPLES:
-  mp3fixer song.mp3
-  mp3fixer ~/Music
-  mp3fixer -n ~/Music
-  mp3fixer -y ~/Music
 EOF
 }
 
@@ -41,12 +34,12 @@ log() {
   [[ "${VERBOSE}" == true ]] && echo "$1"
 }
 
-error() {
-  echo "❌ $1" >&2
-}
-
 warn() {
   echo "⚠️  $1"
+}
+
+error() {
+  echo "❌ $1" >&2
 }
 
 success() {
@@ -54,17 +47,25 @@ success() {
 }
 
 # -------------------------
-# CLEAN + SANITIZE
+# CLEAN
 # -------------------------
 clean() {
-  echo "$1" | tr -d '\r\n' | xargs
+  echo "$1" | tr -d '\r\n' | sed 's/^ *//;s/ *$//'
 }
 
+# -------------------------
+# SANITIZE FILENAME (FIXED)
+# -------------------------
 sanitize_filename() {
   local name="$1"
 
+  # replace forbidden chars
   name=$(echo "$name" | sed 's#[/:*?"<>|]#-#g')
-  name=$(echo "$name" | tr -s ' ')
+
+  # normalize whitespace
+  name=$(echo "$name" | sed 's/[[:space:]]\+/ /g')
+
+  # trim
   name=$(echo "$name" | sed 's/^ *//;s/ *$//')
 
   echo "$name"
@@ -79,12 +80,11 @@ is_supported_extension() {
   for e in "${SUPPORTED_EXTENSIONS[@]}"; do
     [[ "$ext" == "$e" ]] && return 0
   done
-
   return 1
 }
 
 # -------------------------
-# METADATA FETCH
+# METADATA
 # -------------------------
 get_metadata() {
   local field="$1"
@@ -93,7 +93,7 @@ get_metadata() {
   ffprobe -v error \
     -show_entries "format_tags=${field}" \
     -of default=noprint_wrappers=1:nokey=1 \
-    "$file" 2>/dev/null | tr -d '\r\n' || true
+    "$file" 2>/dev/null | tr -d '\r\n'
 }
 
 # -------------------------
@@ -102,12 +102,13 @@ get_metadata() {
 process_file() {
   local file="$1"
 
-  [[ ! -f "$file" ]] && return
+  [[ -f "$file" ]] || return 0
 
-  local ext="${file##*.}"
+  local ext
+  ext="${file##*.}"
   ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
 
-  is_supported_extension "$ext" || return
+  is_supported_extension "$ext" || return 0
 
   local dir current artist title new_name new_path
 
@@ -117,17 +118,17 @@ process_file() {
   artist=$(clean "$(get_metadata artist "$file")")
   title=$(clean "$(get_metadata title "$file")")
 
-  # fallback logic
-  if [[ -z "$artist" ]]; then artist="Unknown Artist"; fi
-  if [[ -z "$title" ]]; then title="Unknown Title"; fi
+  # fallback
+  [[ -z "$artist" ]] && artist="Unknown Artist"
+  [[ -z "$title" ]] && title="Unknown Title"
 
-  new_name="$(sanitize_filename "$artist - $title").$ext"
+  new_name="$(sanitize_filename "${artist} - ${title}").${ext}"
   new_path="${dir}/${new_name}"
 
-  # skip if already correct
+  # skip if same
   if [[ "$current" == "$new_name" ]]; then
     log "⏭️ Skip: $current"
-    return
+    return 0
   fi
 
   echo
@@ -137,56 +138,58 @@ process_file() {
   # prevent overwrite
   if [[ -e "$new_path" ]]; then
     warn "Target exists: $new_name"
-    return
+    return 0
   fi
 
   # dry run
   if [[ "${DRY_RUN}" == true ]]; then
-    echo "🧪 Dry-run: no changes applied"
-    return
+    echo "🧪 Dry-run: $file -> $new_name"
+    return 0
   fi
 
   # confirm
   if [[ "${AUTO_YES}" == false ]]; then
     printf "Apply rename? [Y/n]: "
-    IFS= read -r confirm </dev/tty
+    read -r confirm </dev/tty || true
     confirm=$(echo "$confirm" | xargs)
 
-    if [[ -n "$confirm" && ! "$confirm" =~ ^[Yy]$ ]]; then
+    [[ -n "$confirm" && ! "$confirm" =~ ^[Yy]$ ]] && {
       echo "❌ Cancelled"
-      return
-    fi
+      return 0
+    }
   fi
 
   mv -- "$file" "$new_path"
-  success "Renamed successfully"
+  success "Renamed: $current → $new_name"
 }
 
 # -------------------------
-# PROCESS TARGET
+# PROCESS TARGET (FIXED: NO PIPE SUBSHELL BUG)
 # -------------------------
 process_target() {
   local target="$1"
 
   if [[ -f "$target" ]]; then
     process_file "$target"
-    return
+    return 0
   fi
 
   if [[ -d "$target" ]]; then
 
-    find "$target" -type f \( \
-      -iname "*.mp3" -o \
-      -iname "*.m4a" -o \
-      -iname "*.flac" -o \
-      -iname "*.wav" -o \
-      -iname "*.aac" -o \
-      -iname "*.ogg" \
-    \) -print0 | while IFS= read -r -d '' file; do
+    while IFS= read -r -d '' file; do
       process_file "$file"
-    done
+    done < <(
+      find "$target" -type f \( \
+        -iname "*.mp3" -o \
+        -iname "*.m4a" -o \
+        -iname "*.flac" -o \
+        -iname "*.wav" -o \
+        -iname "*.aac" -o \
+        -iname "*.ogg" \
+      \) -print0
+    )
 
-    return
+    return 0
   fi
 
   error "Invalid path: $target"
@@ -222,10 +225,10 @@ main() {
 
   local target="${1:-}"
 
-  if [[ -z "$target" ]]; then
+  [[ -z "$target" ]] && {
     print_help
     exit 1
-  fi
+  }
 
   command -v ffprobe >/dev/null 2>&1 || {
     error "ffprobe not found. Install ffmpeg first."
