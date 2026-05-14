@@ -110,57 +110,64 @@ process_file() {
 
   is_supported_extension "$ext" || return 0
 
-  local dir current artist title new_name new_path
+  local dir current artist title base new_name new_path
 
   dir=$(dirname "$file")
   current=$(basename "$file")
+  base="${current%.*}"
 
   artist=$(clean "$(get_metadata artist "$file")")
   title=$(clean "$(get_metadata title "$file")")
 
-  # fallback
+  # -------------------------
+  # 🔥 FIX: fallback to filename parsing
+  # -------------------------
+  if [[ -z "$artist" && -z "$title" ]]; then
+    if [[ "$base" == *" - "* ]]; then
+      artist="${base%% - *}"
+      title="${base#* - }"
+    else
+      artist="Unknown Artist"
+      title="$base"
+    fi
+  fi
+
   [[ -z "$artist" ]] && artist="Unknown Artist"
   [[ -z "$title" ]] && title="Unknown Title"
 
   new_name="$(sanitize_filename "${artist} - ${title}").${ext}"
   new_path="${dir}/${new_name}"
 
-  # skip if same
-  if [[ "$current" == "$new_name" ]]; then
+  # skip same
+  [[ "$current" == "$new_name" ]] && {
     log "⏭️ Skip: $current"
     return 0
-  fi
+  }
 
   echo
   echo "🎵 Current : $current"
   echo "✨ Rename  : $new_name"
 
-  # prevent overwrite
   if [[ -e "$new_path" ]]; then
     warn "Target exists: $new_name"
     return 0
   fi
 
-  # dry run
   if [[ "${DRY_RUN}" == true ]]; then
-    echo "🧪 Dry-run: $file -> $new_name"
+    echo "🧪 Dry-run: $current → $new_name"
     return 0
   fi
 
-  # confirm
   if [[ "${AUTO_YES}" == false ]]; then
     printf "Apply rename? [Y/n]: "
     read -r confirm </dev/tty || true
     confirm=$(echo "$confirm" | xargs)
 
-    [[ -n "$confirm" && ! "$confirm" =~ ^[Yy]$ ]] && {
-      echo "❌ Cancelled"
-      return 0
-    }
+    [[ -n "$confirm" && ! "$confirm" =~ ^[Yy]$ ]] && return 0
   fi
 
   mv -- "$file" "$new_path"
-  success "Renamed: $current → $new_name"
+  success "Renamed"
 }
 
 # -------------------------
