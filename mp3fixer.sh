@@ -2,17 +2,15 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 SUPPORTED_EXTENSIONS=(
-  mp3
-  m4a
-  flac
-  wav
-  aac
-  ogg
+  mp3 m4a flac wav aac ogg
 )
 
+# -------------------------
+# HELP
+# -------------------------
 print_help() {
   cat <<EOF
 mp3fixer v${VERSION}
@@ -27,22 +25,18 @@ OPTIONS:
   -n    Dry run mode
   -v    Verbose output
   -h    Show help
-
-EXAMPLES:
-  mp3fixer song.mp3
-  mp3fixer ~/Music
-  mp3fixer -n ~/Music
-  mp3fixer -y ~/Music
-
 EOF
 }
 
+# -------------------------
+# LOGGING
+# -------------------------
 log() {
-  local message="$1"
+  [[ "${VERBOSE}" == true ]] && echo "$1"
+}
 
-  if [[ "${VERBOSE}" == true ]]; then
-    echo "$message"
-  fi
+warn() {
+  echo "⚠️  $1"
 }
 
 error() {
@@ -53,8 +47,11 @@ success() {
   echo "✅ $1"
 }
 
-warn() {
-  echo "⚠️  $1"
+# -------------------------
+# CLEAN STRING (IMPORTANT FIX)
+# -------------------------
+clean() {
+  echo "$1" | tr -d '\r\n' | xargs
 }
 
 sanitize_filename() {
@@ -67,29 +64,35 @@ sanitize_filename() {
   echo "$name"
 }
 
+# -------------------------
+# CHECK EXTENSION
+# -------------------------
 is_supported_extension() {
   local ext="$1"
 
-  for supported in "${SUPPORTED_EXTENSIONS[@]}"; do
-    if [[ "$ext" == "$supported" ]]; then
-      return 0
-    fi
+  for e in "${SUPPORTED_EXTENSIONS[@]}"; do
+    [[ "$ext" == "$e" ]] && return 0
   done
 
   return 1
 }
 
+# -------------------------
+# METADATA SAFE FETCH
+# -------------------------
 get_metadata() {
   local field="$1"
   local file="$2"
 
-  ffprobe \
-    -v error \
+  ffprobe -v error \
     -show_entries "format_tags=${field}" \
     -of default=noprint_wrappers=1:nokey=1 \
     "$file" 2>/dev/null || true
 }
 
+# -------------------------
+# PROCESS FILE
+# -------------------------
 process_file() {
   local file="$1"
 
@@ -98,67 +101,72 @@ process_file() {
   local ext="${file##*.}"
   ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
 
-  if ! is_supported_extension "$ext"; then
-    log "⏭️ Skipped unsupported file: $file"
+  is_supported_extension "$ext" || return
+
+  local dir current_name artist title new_name new_path
+
+  dir=$(dirname "$file")
+  current_name=$(basename "$file")
+
+  artist=$(clean "$(get_metadata artist "$file")")
+  title=$(clean "$(get_metadata title "$file")")
+
+  # -------------------------
+  # FIX: INVALID METADATA GUARD
+  # -------------------------
+  if [[ -z "$artist" || -z "$title" ]]; then
+    warn "Missing metadata → skipping: $current_name"
     return
   fi
 
-  local dir
-  dir=$(dirname "$file")
+  if [[ "$artist" == "Unknown Artist" && "$title" == "Unknown Title" ]]; then
+    warn "Unknown metadata → skipping: $current_name"
+    return
+  fi
 
-  local current_name
-  current_name=$(basename "$file")
-
-  local artist
-  local title
-
-  artist=$(get_metadata artist "$file")
-  title=$(get_metadata title "$file")
-
-  [[ -z "$artist" ]] && artist="Unknown Artist"
-  [[ -z "$title" ]] && title="Unknown Title"
-
-  local new_name
   new_name="$(sanitize_filename "$artist - $title").$ext"
+  new_path="${dir}/${new_name}"
 
   if [[ "$current_name" == "$new_name" ]]; then
     log "⏭️ Already correct: $current_name"
     return
   fi
 
-  local new_path="${dir}/${new_name}"
-
   echo
   echo "🎵 Current : $current_name"
   echo "✨ Rename  : $new_name"
 
+  # prevent overwrite
   if [[ -e "$new_path" ]]; then
-    warn "Target already exists: $new_name"
+    warn "Target exists → skipping: $new_name"
     return
   fi
 
+  # dry run
   if [[ "${DRY_RUN}" == true ]]; then
-    echo "🧪 Dry run mode: skipped"
+    echo "🧪 Dry-run: no changes"
     return
   fi
 
+  # confirm
   if [[ "${AUTO_YES}" == false ]]; then
     printf "Apply rename? [Y/n]: "
-
     local confirm
     IFS= read -r confirm </dev/tty
 
-    if [[ -n "$confirm" && ! "$confirm" =~ ^[Yy]$ ]]; then
+    [[ -n "$confirm" && ! "$confirm" =~ ^[Yy]$ ]] && {
       echo "❌ Cancelled"
       return
-    fi
+    }
   fi
 
-  mv "$file" "$new_path"
-
-  success "Renamed successfully"
+  mv -- "$file" "$new_path"
+  success "Renamed"
 }
 
+# -------------------------
+# PROCESS TARGET (FIXED FIND)
+# -------------------------
 process_target() {
   local target="$1"
 
@@ -168,9 +176,18 @@ process_target() {
   fi
 
   if [[ -d "$target" ]]; then
-    while IFS= read -r -d '' file; do
+
+    # FIX: filter only audio extensions (prevents junk + speed boost)
+    find "$target" -type f \( \
+      -iname "*.mp3" -o \
+      -iname "*.m4a" -o \
+      -iname "*.flac" -o \
+      -iname "*.wav" -o \
+      -iname "*.aac" -o \
+      -iname "*.ogg" \
+    \) -print0 | while IFS= read -r -d '' file; do
       process_file "$file"
-    done < <(find "$target" -type f -print0)
+    done
 
     return
   fi
@@ -179,6 +196,9 @@ process_target() {
   exit 1
 }
 
+# -------------------------
+# MAIN
+# -------------------------
 main() {
   AUTO_YES=false
   DRY_RUN=false
@@ -186,15 +206,9 @@ main() {
 
   while getopts ":ynvh" opt; do
     case "$opt" in
-      y)
-        AUTO_YES=true
-        ;;
-      n)
-        DRY_RUN=true
-        ;;
-      v)
-        VERBOSE=true
-        ;;
+      y) AUTO_YES=true ;;
+      n) DRY_RUN=true ;;
+      v) VERBOSE=true ;;
       h)
         print_help
         exit 0
@@ -211,15 +225,15 @@ main() {
 
   local target="${1:-}"
 
-  if [[ -z "$target" ]]; then
+  [[ -z "$target" ]] && {
     print_help
     exit 1
-  fi
+  }
 
-  if ! command -v ffprobe >/dev/null 2>&1; then
-    error "ffprobe not found. Install ffmpeg first."
+  command -v ffprobe >/dev/null 2>&1 || {
+    error "ffprobe not found (install ffmpeg)"
     exit 1
-  fi
+  }
 
   process_target "$target"
 }
