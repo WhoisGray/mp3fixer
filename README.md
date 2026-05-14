@@ -165,6 +165,10 @@ mp3fixer/
 ├── mp3fixer.sh
 └── README.md
 ```
+
+# TODO :
+  *  Bug with Directory : /
+ 
 ---
 # Author
 Yashar Razban
